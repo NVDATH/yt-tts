@@ -1,0 +1,5 @@
+customtkinter
+pytchat
+edge-tts
+pygame
+pyinstaller
