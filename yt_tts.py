@@ -39,6 +39,8 @@ os.environ["SSL_CERT_FILE"] = certifi.where()
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 
 DEFAULT_EDGE_VOICE = "th-TH-PremwadeeNeural"
+# Microsoft มักตอบกลับว่างเป็นครั้งคราว (NoAudioReceived) การลองใหม่มักหายได้
+EDGE_RETRIES = 3
 
 # รหัสภายในของแต่ละ Engine และชื่อที่แสดงในหน้าจอ
 ENGINE_LABELS = {
@@ -47,6 +49,38 @@ ENGINE_LABELS = {
     "sapi": "SAPI5 (เสียงในเครื่อง Windows)",
 }
 SELECTABLE_ENGINES = ["edge", "gtts"] + (["sapi"] if SAPI_AVAILABLE else [])
+
+# ตัวกรองรายชื่อเสียง SAPI5 (เสียง "Online (Natural)" จะเก็บเฉพาะรุ่น Multilingual)
+SAPI_FILTERS = [
+    "เสียงในเครื่อง + Online Multilingual",
+    "เฉพาะเสียงในเครื่อง (ออฟไลน์)",
+    "เฉพาะ Online Multilingual",
+    "ทั้งหมด",
+]
+
+
+def is_sapi_online(name):
+    return "online" in name.lower()
+
+
+def filter_sapi_voices(names, mode):
+    """mode คือ index ของ SAPI_FILTERS"""
+    result = []
+    for n in names:
+        online = is_sapi_online(n)
+        multi = "multilingual" in n.lower()
+        if mode == 0:
+            keep = (not online) or multi
+        elif mode == 1:
+            keep = not online
+        elif mode == 2:
+            keep = online and multi
+        else:
+            keep = True
+        if keep:
+            result.append(n)
+    return result
+
 
 # gTTS ไม่มีให้เลือกเสียง มีแค่ภาษา
 GTTS_VOICES = ["ภาษาไทย (th)"]
@@ -71,7 +105,7 @@ class YouTubeTTSFrame(wx.Frame):
         super().__init__(
             None,
             title="YouTube Live TTS Reader",
-            size=(560, 700),
+            size=(560, 735),
             style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX),
         )
 
@@ -79,7 +113,8 @@ class YouTubeTTSFrame(wx.Frame):
         self.is_running = False
         self.speech_queue = queue.Queue()
         self.edge_voices = ["th-TH-PremwadeeNeural", "th-TH-NiwatNeural"]
-        self.sapi_voices = []
+        self.sapi_all = []  # รายชื่อดิบที่ SAPI5 รายงาน
+        self.sapi_voices = []  # หลังผ่านตัวกรอง
         # ค่าตั้งค่าที่ thread อื่นอ่านได้อย่างปลอดภัย (อัปเดตจาก GUI thread เท่านั้น)
         self.cfg = {}
 
@@ -140,6 +175,14 @@ class YouTubeTTSFrame(wx.Frame):
         self.engine_choice.SetSelection(0)
         self.engine_choice.Bind(wx.EVT_CHOICE, self.on_engine_changed)
 
+        sapi_filter_lbl = wx.StaticText(voice_box, label="ตัวกรองเสียง SAPI5 (&F):")
+        self.sapi_filter_choice = wx.Choice(
+            voice_box, choices=SAPI_FILTERS, name="ตัวกรองเสียง SAPI5"
+        )
+        self.sapi_filter_choice.SetSelection(0)
+        self.sapi_filter_choice.Bind(wx.EVT_CHOICE, self.on_sapi_filter_changed)
+        self.sapi_filter_choice.Enable(SELECTABLE_ENGINES[0] == "sapi")
+
         voice_lbl = wx.StaticText(voice_box, label="เสียงอ่านหลัก (&V):")
         self.voice_choice = wx.Choice(voice_box, name="เสียงอ่านหลัก")
         self.voice_choice.Bind(wx.EVT_CHOICE, self.refresh_cfg)
@@ -174,6 +217,8 @@ class YouTubeTTSFrame(wx.Frame):
 
         grid.Add(engine_lbl, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.engine_choice, 1, wx.EXPAND)
+        grid.Add(sapi_filter_lbl, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(self.sapi_filter_choice, 1, wx.EXPAND)
         grid.Add(voice_lbl, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.voice_choice, 1, wx.EXPAND)
         grid.Add(speed_lbl, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -291,12 +336,26 @@ class YouTubeTTSFrame(wx.Frame):
         if event is not None:
             event.Skip()
 
+    def apply_sapi_filter(self):
+        mode = self.sapi_filter_choice.GetSelection()
+        self.sapi_voices = filter_sapi_voices(self.sapi_all, mode)
+
+    def on_sapi_filter_changed(self, event):
+        self.apply_sapi_filter()
+        self.populate_voices(keep=self.voice_choice.GetStringSelection())
+        self.refresh_cfg()
+        self.log(
+            f"ตัวกรอง SAPI5: เหลือ {len(self.sapi_voices)} จาก {len(self.sapi_all)} เสียง"
+        )
+        event.Skip()
+
     def on_engine_changed(self, event):
+        self.sapi_filter_choice.Enable(self.current_engine() == "sapi")
         self.populate_voices()
         self.refresh_cfg()
         event.Skip()
 
-    def populate_voices(self):
+    def populate_voices(self, keep=None):
         engine = self.current_engine()
         if engine == "sapi":
             voices = self.sapi_voices
@@ -307,7 +366,9 @@ class YouTubeTTSFrame(wx.Frame):
         self.voice_choice.Set(list(voices))
         if not voices:
             return
-        if engine == "edge" and DEFAULT_EDGE_VOICE in voices:
+        if keep and keep in voices:
+            self.voice_choice.SetSelection(voices.index(keep))
+        elif engine == "edge" and DEFAULT_EDGE_VOICE in voices:
             self.voice_choice.SetSelection(voices.index(DEFAULT_EDGE_VOICE))
         else:
             self.voice_choice.SetSelection(0)
@@ -348,7 +409,7 @@ class YouTubeTTSFrame(wx.Frame):
                     ]
                 finally:
                     pythoncom.CoUninitialize()
-                self.sapi_voices = names
+                self.sapi_all = names
                 self.log(f"พบเสียง SAPI5 ในเครื่อง {len(names)} เสียง")
             except Exception as e:
                 self.log(f"โหลดรายชื่อเสียง SAPI5 ไม่สำเร็จ: {e}")
@@ -377,6 +438,11 @@ class YouTubeTTSFrame(wx.Frame):
         wx.CallAfter(self._update_voice_list)
 
     def _update_voice_list(self):
+        self.apply_sapi_filter()
+        if SAPI_AVAILABLE and self.sapi_all:
+            self.log(
+                f"SAPI5 หลังกรอง: {len(self.sapi_voices)} จาก {len(self.sapi_all)} เสียง"
+            )
         self.populate_voices()
         self.refresh_cfg()
 
@@ -526,6 +592,9 @@ class YouTubeTTSFrame(wx.Frame):
         )
 
     def _speak_edge(self, text, cfg, primary, is_test):
+        if not re.search(r"\w", text):
+            self.log("ข้ามข้อความที่ไม่มีตัวอักษรให้อ่าน")
+            return True
         voices = self.edge_voices
         if primary and cfg["random"] and voices:
             voice = random.choice(voices)
@@ -545,12 +614,27 @@ class YouTubeTTSFrame(wx.Frame):
         try:
             asyncio.set_event_loop(loop)
             for v in candidates:
-                try:
-                    loop.run_until_complete(
-                        self._edge_save_audio(text, v, temp_file, rate)
-                    )
-                except Exception as e:
-                    self.log(f"Edge TTS ({v}) ขัดข้อง: {e}")
+                saved = False
+                for attempt in range(1, EDGE_RETRIES + 1):
+                    if not (self.is_running or is_test):
+                        return False
+                    try:
+                        loop.run_until_complete(
+                            self._edge_save_audio(text, v, temp_file, rate)
+                        )
+                        saved = True
+                        break
+                    except edge_tts.exceptions.NoAudioReceived:
+                        self.log(
+                            f"Edge TTS ({v}) ไม่ได้รับเสียงจากเซิร์ฟเวอร์ "
+                            f"(ครั้งที่ {attempt}/{EDGE_RETRIES})"
+                        )
+                        if attempt < EDGE_RETRIES:
+                            time.sleep(0.8 * attempt)
+                    except Exception as e:
+                        self.log(f"Edge TTS ({v}) ขัดข้อง: {type(e).__name__}: {e}")
+                        break
+                if not saved:
                     continue
                 if os.path.exists(temp_file) and os.path.getsize(temp_file) > 0:
                     if is_test:
