@@ -1,3 +1,4 @@
+wxPython
 pytchat
 edge-tts
 pygame

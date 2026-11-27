@@ -1,16 +1,18 @@
-"""
-===========================================================================
-YouTube Live TTS Reader (NVDA / Screen Reader Accessible Version)
-===========================================================================
-เปลี่ยนไปใช้ Standard Tkinter / ttk (Native Windows Controls)
-เพื่อรองรับโปรแกรมอ่านหน้าจอ (NVDA, JAWS, Narrator) 100%
-
-วิธีใช้งาน:
-1. ติดตั้งไลบรารี: pip install -r requirements.txt
-2. รันทดสอบ: python yt_tts.py
-3. สร้างไฟล์ .exe: pyinstaller --noconsole --onefile yt_tts.py
-===========================================================================
-"""
+# ==============================================================================
+# โปรแกรมอ่านออกเสียงแชทสด YouTube Live (YouTube Live TTS Reader) - NVDA Accessible Edition
+# พัฒนาด้วย wxPython (Native Windows Accessibility / MSAA & UIA)
+# ==============================================================================
+#
+# วิธีติดตั้งไลบรารีที่จำเป็น:
+#   pip install wxPython pytchat edge-tts pygame pyinstaller
+#
+# วิธีทดสอบรันโปรแกรม:
+#   python yt_tts.py
+#
+# วิธีบีบอัดเป็นไฟล์ .exe เดียวจบ (Standalone):
+#   pyinstaller --noconsole --onefile yt_tts.py
+#   (ไฟล์ที่ได้จะอยู่ในโฟลเดอร์ dist/yt_tts.exe)
+# ==============================================================================
 
 import asyncio
 import os
@@ -20,157 +22,139 @@ import re
 import tempfile
 import threading
 import time
-import tkinter as tk
-from tkinter import ttk, scrolledtext
 import edge_tts
 import pygame
 import pytchat
+import wx
 
 
-class YouTubeTTSApp(tk.Tk):
+class YouTubeTTSFrame(wx.Frame):
     def __init__(self):
-        super().__init__()
+        super().__init__(
+            None,
+            title="YouTube Live TTS Reader",
+            size=(560, 620),
+            style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX)
+        )
 
-        self.title("YouTube Live TTS Reader (Accessible)")
-        self.geometry("560x640")
-        self.resizable(True, True)
-
-        # ใช้ธีมมาตรฐานของ Windows เพื่อให้ NVDA อ่าน Focus และสถานะได้สมบูรณ์
-        style = ttk.Style(self)
-        if "vista" in style.theme_names():
-            style.theme_use("vista")
-
-        # ตัวแปรควบคุมระบบ
         self.is_running = False
         self.speech_queue = queue.Queue()
         self.voice_list = ["th-TH-PremwadeeNeural", "th-TH-NiwatNeural"]
 
-        # เริ่มระบบเสียง Pygame
         pygame.mixer.init()
 
         self.setup_ui()
+        self.Centre()
 
-        # โหลดรายชื่อเสียง Multilingual ในพื้นหลัง
+        # โฟกัสไปที่ช่องกรอก URL ทันทีเมื่อเปิดโปรแกรม
+        self.url_entry.SetFocus()
+
+        # โหลดรายชื่อเสียงและเริ่มตัวจัดการคิวใน Thread แยก
         threading.Thread(target=self.load_voices_thread, daemon=True).start()
-        # เริ่ม Worker รออ่านคิวเสียง
         threading.Thread(target=self.audio_worker, daemon=True).start()
 
     def setup_ui(self):
-        main_frame = ttk.Frame(self, padding="12")
-        main_frame.pack(fill="both", expand=True)
+        panel = wx.Panel(self)
+        main_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # --- ส่วนที่ 1: ช่องใส่ URL ---
-        url_group = ttk.LabelFrame(main_frame, text="1. ลิงก์ไลฟ์สด YouTube", padding="10")
-        url_group.pack(fill="x", pady=(0, 10))
+        url_label = wx.StaticText(panel, label="YouTube Live &URL หรือ Video ID:")
+        main_sizer.Add(url_label, 0, wx.LEFT | wx.TOP, 15)
 
-        ttk.Label(url_group, text="YouTube Live URL หรือ Video ID:").pack(anchor="w")
-        self.url_entry = ttk.Entry(url_group)
-        self.url_entry.pack(fill="x", pady=(4, 0))
-        self.url_entry.focus_set()  # ให้โฟกัสเริ่มต้นที่ช่องกรอกลิงก์ทันที
+        self.url_entry = wx.TextCtrl(panel, name="YouTube Live URL หรือ Video ID")
+        main_sizer.Add(self.url_entry, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 15)
 
         # --- ส่วนที่ 2: ตั้งค่าเสียง ---
-        voice_group = ttk.LabelFrame(main_frame, text="2. ตั้งค่าเสียงอ่าน", padding="10")
-        voice_group.pack(fill="x", pady=(0, 10))
+        voice_box = wx.StaticBox(panel, label="ตั้งค่าเสียงอ่าน")
+        voice_sizer = wx.StaticBoxSizer(voice_box, wx.VERTICAL)
 
-        self.random_voice_var = tk.BooleanVar(value=False)
-        self.random_cb = ttk.Checkbutton(
-            voice_group,
-            text="สุ่มเสียงอัตโนมัติ (จากเสียงไทย และ Multilingual)",
-            variable=self.random_voice_var,
-            command=self.toggle_voice_dropdown,
-        )
-        self.random_cb.pack(anchor="w", pady=(0, 6))
+        self.random_cb = wx.CheckBox(panel, label="&สุ่มเสียงอัตโนมัติ (จากเสียงไทย และ Multilingual)")
+        self.random_cb.Bind(wx.EVT_CHECKBOX, self.on_toggle_random_voice)
+        voice_sizer.Add(self.random_cb, 0, wx.ALL, 8)
 
-        ttk.Label(voice_group, text="เลือกเสียงอ่าน (กรณีไม่ได้ติ๊กสุ่มเสียง):").pack(anchor="w")
-        self.voice_var = tk.StringVar(value="th-TH-PremwadeeNeural")
-        self.voice_combobox = ttk.Combobox(
-            voice_group,
-            textvariable=self.voice_var,
-            values=self.voice_list,
-            state="readonly",
-        )
-        self.voice_combobox.pack(fill="x", pady=(4, 0))
+        voice_select_label = wx.StaticText(panel, label="&เลือกเสียงอ่าน (เมื่อไม่ได้สุ่มเสียง):")
+        voice_sizer.Add(voice_select_label, 0, wx.LEFT | wx.TOP, 8)
+
+        self.voice_choice = wx.Choice(panel, choices=self.voice_list, name="เลือกเสียงอ่าน")
+        self.voice_choice.SetSelection(0)
+        voice_sizer.Add(self.voice_choice, 0, wx.EXPAND | wx.ALL, 8)
+
+        main_sizer.Add(voice_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 15)
 
         # --- ส่วนที่ 3: เลือกหมวดข้อความที่จะให้อ่าน ---
-        filter_group = ttk.LabelFrame(main_frame, text="3. เลือกหมวดข้อความที่จะให้อ่านออกเสียง", padding="10")
-        filter_group.pack(fill="x", pady=(0, 10))
+        filter_box = wx.StaticBox(panel, label="เลือกหมวดข้อความที่จะให้อ่านออกเสียง")
+        filter_sizer = wx.StaticBoxSizer(filter_box, wx.VERTICAL)
 
-        self.read_normal_var = tk.BooleanVar(value=False)
-        self.read_superchat_var = tk.BooleanVar(value=True)
-        self.read_sticker_var = tk.BooleanVar(value=True)
-        self.read_member_var = tk.BooleanVar(value=True)
+        self.read_normal_cb = wx.CheckBox(panel, label="ข้อความแชท&ปกติ (Normal Chat)")
+        self.read_normal_cb.SetValue(False)
+        filter_sizer.Add(self.read_normal_cb, 0, wx.ALL, 6)
 
-        ttk.Checkbutton(
-            filter_group,
-            text="ข้อความแชทปกติ (Normal Chat)",
-            variable=self.read_normal_var,
-        ).pack(anchor="w", pady=2)
+        self.read_superchat_cb = wx.CheckBox(panel, label="Super &Chat (โดเนทข้อความ)")
+        self.read_superchat_cb.SetValue(True)
+        filter_sizer.Add(self.read_superchat_cb, 0, wx.ALL, 6)
 
-        ttk.Checkbutton(
-            filter_group,
-            text="Super Chat (โดเนทข้อความ)",
-            variable=self.read_superchat_var,
-        ).pack(anchor="w", pady=2)
+        self.read_sticker_cb = wx.CheckBox(panel, label="Super S&ticker (โดเนทสติกเกอร์)")
+        self.read_sticker_cb.SetValue(True)
+        filter_sizer.Add(self.read_sticker_cb, 0, wx.ALL, 6)
 
-        ttk.Checkbutton(
-            filter_group,
-            text="Super Sticker (โดเนทสติกเกอร์)",
-            variable=self.read_sticker_var,
-        ).pack(anchor="w", pady=2)
+        self.read_member_cb = wx.CheckBox(panel, label="New &Member / Milestone (สมัครสมาชิกใหม่)")
+        self.read_member_cb.SetValue(True)
+        filter_sizer.Add(self.read_member_cb, 0, wx.ALL, 6)
 
-        ttk.Checkbutton(
-            filter_group,
-            text="New Member / Milestone (สมัครสมาชิกใหม่)",
-            variable=self.read_member_var,
-        ).pack(anchor="w", pady=2)
+        main_sizer.Add(filter_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 15)
 
-        # --- ส่วนที่ 4: ปุ่มควบคุม (รองรับคีย์ลัด Alt+S และ Alt+X) ---
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill="x", pady=(0, 10))
+        # --- ส่วนที่ 4: ปุ่มควบคุม ---
+        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        self.start_btn = ttk.Button(
-            btn_frame,
-            text="เริ่มอ่านแชท (Alt+S)",
-            underline=14,
-            command=self.start_bot,
+        self.start_btn = wx.Button(panel, label="เริ่มอ่านแชท (Alt+S)")
+        self.start_btn.Bind(wx.EVT_BUTTON, self.on_start)
+        btn_sizer.Add(self.start_btn, 1, wx.RIGHT, 5)
+
+        self.stop_btn = wx.Button(panel, label="หยุดทำงาน (Alt+X)")
+        self.stop_btn.Disable()
+        self.stop_btn.Bind(wx.EVT_BUTTON, self.on_stop)
+        btn_sizer.Add(self.stop_btn, 1, wx.LEFT, 5)
+
+        main_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 15)
+
+        # --- ส่วนที่ 5: กล่องแสดงสถานะ (Log) ---
+        log_label = wx.StaticText(panel, label="บันทึกการทำงาน (&Log):")
+        main_sizer.Add(log_label, 0, wx.LEFT | wx.TOP, 15)
+
+        self.log_box = wx.TextCtrl(
+            panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
+            name="บันทึกการทำงาน Log"
         )
-        self.start_btn.pack(side="left", expand=True, fill="x", padx=(0, 5))
+        main_sizer.Add(self.log_box, 1, wx.EXPAND | wx.ALL, 15)
 
-        self.stop_btn = ttk.Button(
-            btn_frame,
-            text="หยุดทำงาน (Alt+X)",
-            underline=12,
-            state="disabled",
-            command=self.stop_bot,
-        )
-        self.stop_btn.pack(side="right", expand=True, fill="x", padx=(5, 0))
+        # ตั้งค่า Accelerator Table สำหรับคีย์ลัด Alt+S และ Alt+X
+        id_start = wx.NewIdRef()
+        id_stop = wx.NewIdRef()
+        self.Bind(wx.EVT_MENU, self.on_start, id=id_start)
+        self.Bind(wx.EVT_MENU, self.on_stop, id=id_stop)
 
-        # ผูกคีย์ลัดระดับหน้าต่างเพื่อให้กดได้ทันทีจากทุกจุด
-        self.bind("<Alt-s>", lambda e: self.start_bot() if str(self.start_btn["state"]) == "normal" else None)
-        self.bind("<Alt-S>", lambda e: self.start_bot() if str(self.start_btn["state"]) == "normal" else None)
-        self.bind("<Alt-x>", lambda e: self.stop_bot() if str(self.stop_btn["state"]) == "normal" else None)
-        self.bind("<Alt-X>", lambda e: self.stop_bot() if str(self.stop_btn["state"]) == "normal" else None)
+        accel_tbl = wx.AcceleratorTable([
+            (wx.ACCEL_ALT, ord('S'), id_start),
+            (wx.ACCEL_ALT, ord('X'), id_stop),
+        ])
+        self.SetAcceleratorTable(accel_tbl)
 
-        # --- ส่วนที่ 5: กล่องแสดงสถานะ (Log) ที่ NVDA เลื่อนลูกศรอ่านได้ ---
-        log_group = ttk.LabelFrame(main_frame, text="4. บันทึกการทำงาน (ใช้ลูกศรขึ้น-ลงเพื่ออ่านข้อความ)", padding="10")
-        log_group.pack(fill="both", expand=True)
-
-        self.log_box = scrolledtext.ScrolledText(log_group, height=10, wrap="word", state="disabled")
-        self.log_box.pack(fill="both", expand=True)
+        self.Bind(wx.EVT_CLOSE, self.on_close)
+        panel.SetSizer(main_sizer)
 
     def log(self, message):
-        def _append():
-            self.log_box.configure(state="normal")
-            self.log_box.insert("end", message + "\n")
-            self.log_box.see("end")
-            self.log_box.configure(state="disabled")
-        self.after(0, _append)
+        wx.CallAfter(self._append_log, message)
 
-    def toggle_voice_dropdown(self):
-        if self.random_voice_var.get():
-            self.voice_combobox.configure(state="disabled")
+    def _append_log(self, message):
+        if self.log_box:
+            self.log_box.AppendText(message + "\n")
+
+    def on_toggle_random_voice(self, event):
+        if self.random_cb.GetValue():
+            self.voice_choice.Disable()
         else:
-            self.voice_combobox.configure(state="readonly")
+            self.voice_choice.Enable()
 
     def extract_video_id(self, url):
         patterns = [
@@ -195,50 +179,70 @@ class YouTubeTTSApp(tk.Tk):
             ]
             if filtered:
                 self.voice_list = sorted(filtered)
-                def _update_combo():
-                    self.voice_combobox.configure(values=self.voice_list)
-                    if "th-TH-PremwadeeNeural" in self.voice_list:
-                        self.voice_var.set("th-TH-PremwadeeNeural")
-                self.after(0, _update_combo)
-                self.log(f"โหลดรายชื่อเสียงสำเร็จ ({len(self.voice_list)} เสียงที่พูดไทยได้)")
+                wx.CallAfter(self._update_voice_list)
         except Exception as e:
             self.log(f"โหลดรายชื่อเสียงไม่สำเร็จ (ใช้เสียงพื้นฐานแทน): {e}")
 
-    def start_bot(self):
-        raw_input = self.url_entry.get()
+    def _update_voice_list(self):
+        self.voice_choice.Clear()
+        self.voice_choice.AppendItems(self.voice_list)
+        if "th-TH-PremwadeeNeural" in self.voice_list:
+            idx = self.voice_list.index("th-TH-PremwadeeNeural")
+            self.voice_choice.SetSelection(idx)
+        else:
+            self.voice_choice.SetSelection(0)
+        self.log(f"โหลดรายชื่อเสียงสำเร็จ ({len(self.voice_list)} เสียงที่พูดไทยได้)")
+
+    def on_start(self, event):
+        if self.is_running:
+            return
+
+        raw_input = self.url_entry.GetValue()
         video_id = self.extract_video_id(raw_input)
         if not video_id:
-            self.log("ข้อผิดพลาด: รูปแบบ URL หรือ Video ID ไม่ถูกต้อง")
-            self.url_entry.focus_set()
+            wx.MessageBox(
+                "รูปแบบ URL หรือ Video ID ไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง",
+                "ข้อผิดพลาด",
+                wx.OK | wx.ICON_ERROR
+            )
+            self.url_entry.SetFocus()
             return
 
         self.is_running = True
-        self.start_btn.configure(state="disabled")
-        self.stop_btn.configure(state="normal")
-        self.url_entry.configure(state="disabled")
-        self.stop_btn.focus_set()  # ย้ายโฟกัสไปที่ปุ่มหยุดทำงานเพื่อให้กด Spacebar หยุดได้ทันที
-        self.log(f"กำลังเชื่อมต่อกับแชทของ Video ID: {video_id} ...")
+        self.start_btn.Disable()
+        self.url_entry.Disable()
+        self.stop_btn.Enable()
+        self.stop_btn.SetFocus()
 
+        self.log(f"กำลังเชื่อมต่อกับแชทของ Video ID: {video_id} ...")
         threading.Thread(
             target=self.chat_listener_thread, args=(video_id,), daemon=True
         ).start()
 
-    def stop_bot(self):
+    def on_stop(self, event):
+        if not self.is_running:
+            return
+
         self.is_running = False
         with self.speech_queue.mutex:
             self.speech_queue.queue.clear()
         pygame.mixer.music.stop()
 
-        self.start_btn.configure(state="normal")
-        self.stop_btn.configure(state="disabled")
-        self.url_entry.configure(state="normal")
-        self.start_btn.focus_set()
+        self.stop_btn.Disable()
+        self.start_btn.Enable()
+        self.url_entry.Enable()
+        self.start_btn.SetFocus()
         self.log("หยุดการทำงานแล้ว")
+
+    def on_close(self, event):
+        self.is_running = False
+        pygame.mixer.quit()
+        self.Destroy()
 
     def chat_listener_thread(self, video_id):
         try:
             chat = pytchat.create(video_id=video_id)
-            self.log("เชื่อมต่อแชทสำเร็จ! กำลังรอรับข้อความ...")
+            self.log("เชื่อมต่อแชทสำเร็จ กำลังรอรับข้อความ...")
 
             while self.is_running and chat.is_alive():
                 for c in chat.get().sync_items():
@@ -250,19 +254,25 @@ class YouTubeTTSApp(tk.Tk):
                     msg = c.message
                     text_to_speak = None
 
-                    if msg_type == "textMessage" and self.read_normal_var.get():
+                    if msg_type == "textMessage" and self.read_normal_cb.GetValue():
                         text_to_speak = f"{author} พูดว่า {msg}"
 
-                    elif msg_type == "superChat" and self.read_superchat_var.get():
+                    elif msg_type == "superChat" and self.read_superchat_cb.GetValue():
                         amount = c.amountString
-                        text_to_speak = f"ขอบคุณคุณ {author} สำหรับซุปเปอร์แชท {amount} ครับ {msg}"
+                        text_to_speak = (
+                            f"ขอบคุณคุณ {author} สำหรับซุปเปอร์แชท {amount} ครับ {msg}"
+                        )
 
-                    elif msg_type == "superSticker" and self.read_sticker_var.get():
+                    elif msg_type == "superSticker" and self.read_sticker_cb.GetValue():
                         amount = c.amountString
-                        text_to_speak = f"ขอบคุณคุณ {author} สำหรับซุปเปอร์สติกเกอร์ {amount} ครับ"
+                        text_to_speak = (
+                            f"ขอบคุณคุณ {author} สำหรับซุปเปอร์สติกเกอร์ {amount} ครับ"
+                        )
 
-                    elif msg_type == "newSponsor" and self.read_member_var.get():
-                        text_to_speak = f"ยินดีต้อนรับคุณ {author} สู่การเป็นสมาชิกใหม่ครับ {msg}"
+                    elif msg_type == "newSponsor" and self.read_member_cb.GetValue():
+                        text_to_speak = (
+                            f"ยินดีต้อนรับคุณ {author} สู่การเป็นสมาชิกใหม่ครับ {msg}"
+                        )
 
                     if text_to_speak:
                         self.log(f"[{msg_type}] {text_to_speak}")
@@ -272,11 +282,11 @@ class YouTubeTTSApp(tk.Tk):
 
             if self.is_running:
                 self.log("ไลฟ์สดจบลงแล้ว หรือการเชื่อมต่อถูกตัด")
-                self.after(0, self.stop_bot)
+                wx.CallAfter(self.on_stop, None)
 
         except Exception as e:
             self.log(f"เกิดข้อผิดพลาดในการดึงแชท: {e}")
-            self.after(0, self.stop_bot)
+            wx.CallAfter(self.on_stop, None)
 
     def audio_worker(self):
         loop = asyncio.new_event_loop()
@@ -289,10 +299,11 @@ class YouTubeTTSApp(tk.Tk):
                 continue
 
             try:
-                if self.random_voice_var.get():
+                if self.random_cb.GetValue():
                     voice = random.choice(self.voice_list)
                 else:
-                    voice = self.voice_var.get()
+                    idx = self.voice_choice.GetSelection()
+                    voice = self.voice_choice.GetString(idx) if idx != wx.NOT_FOUND else "th-TH-PremwadeeNeural"
 
                 temp_file = os.path.join(
                     tempfile.gettempdir(), f"tts_{random.randint(10000,99999)}.mp3"
@@ -317,5 +328,7 @@ class YouTubeTTSApp(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = YouTubeTTSApp()
-    app.mainloop()
+    app = wx.App(False)
+    frame = YouTubeTTSFrame()
+    frame.Show()
+    app.MainLoop()

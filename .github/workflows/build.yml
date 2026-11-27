@@ -1,4 +1,4 @@
-name: Build Accessible Windows EXE
+name: Build Windows EXE
 
 on:
   push:
@@ -27,8 +27,8 @@ jobs:
         run: |
           pyinstaller --noconsole --onefile yt_tts.py
 
-      - name: Upload EXE Artifact
+      - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
-          name: yt_tts_windows_exe
+          name: YouTube-Live-TTS-Windows
           path: dist/yt_tts.exe
